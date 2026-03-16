@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>C2Client</AssemblyName>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <PublishTrimmed>true</PublishTrimmed>
+
+    <!-- Build-time C2 server URL, override with:
+         dotnet publish /p:C2Server=10.0.0.1:8000
+         or set env: C2_SERVER=10.0.0.1:8000 before build -->
+    <C2Server Condition="'$(C2Server)' == ''">127.0.0.1:8000</C2Server>
+    <C2Interval Condition="'$(C2Interval)' == ''">10</C2Interval>
+    <C2Jitter Condition="'$(C2Jitter)' == ''">0.3</C2Jitter>
+    <DefineConstants>$(DefineConstants);C2_SERVER_BUILTIN</DefineConstants>
+  </PropertyGroup>
+
+  <!-- Windows-specific APIs needed for cross-compilation on Linux -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Win32.Registry" Version="5.0.0" />
+  </ItemGroup>
+
+  <!-- Write build config to a generated file so Program.cs can read it -->
+  <Target Name="GenerateBuildConfig" BeforeTargets="CoreCompile">
+    <WriteLinesToFile
+      File="$(IntermediateOutputPath)BuildConfig.g.cs"
+      Overwrite="true"
+      Lines="namespace C2Client { static partial class BuildConfig { public const string Server = &quot;$(C2Server)&quot;%3B public const int Interval = $(C2Interval)%3B public const double Jitter = $(C2Jitter)%3B } }" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)BuildConfig.g.cs" />
+    </ItemGroup>
+  </Target>
+
+</Project>

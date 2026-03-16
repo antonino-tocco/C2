@@ -1,0 +1,57 @@
+# Project-specific directories (keep existing)
+Bash-Offensive-Security/
+Malware-Dev-Learning/
+PowerShell-Offensive-Security/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# Node.js / npm
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# TypeScript
+*.tsbuildinfo
+
+# JetBrains IDEs
+.idea/
+
+# Environment variables
+.env
+.env.local
+
+# Docker
+*.log
+
+# C/C++
+*.o
+*.out
+*.exe
+a.out
+
+# C# / .NET
+bin/
+obj/
+*.dll
+*.pdb
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+.claude
+AUDIT.md

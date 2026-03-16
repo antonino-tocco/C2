@@ -1,0 +1,12 @@
+scapy
+fastapi
+pydantic
+uvicorn
+dnslib
+sqlmodel
+psycopg2-binary
+bcrypt==4.3.0
+python-jose[cryptography]
+passlib[bcrypt]
+python-dotenv
+cryptography

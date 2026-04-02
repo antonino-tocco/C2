@@ -64,7 +64,7 @@ class HttpServer(Server):
         super().__init__()
         self.__port = port
         self.__server = _HTTPServer(self.__port)
-        self._thread = Thread(target=self.__server.start)
+        self._thread = Thread(target=self.__server.start, daemon=True)
 
     def start(self):
         print(f"Server starting at port: {self.__port}")

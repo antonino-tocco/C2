@@ -19,7 +19,8 @@ def main():
     # Start DNS server only when explicitly enabled via env var.
     # Set ENABLE_DNS_SERVER=true and optionally C2_DNS_DOMAIN / DNS_PORT.
     enable_dns = os.getenv("ENABLE_DNS_SERVER", "false").lower() == "true"
-    dns_port = int(os.getenv("DNS_PORT", "5353"))
+    dns_port = int(os.getenv("DNS_PORT", "15353"))
+    print(f"[*] DNS server enabled: {enable_dns}, port: {dns_port}")
     dns_server = DNSServer(port=dns_port) if enable_dns else None
 
     try:
@@ -31,9 +32,9 @@ def main():
             pass
 
     except KeyboardInterrupt:
-        http_server.stop()
         if dns_server:
             dns_server.stop()
+        http_server.stop()
 
 
 if __name__ == "__main__":

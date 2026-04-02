@@ -11,21 +11,21 @@ A full-stack Command & Control (C2) framework built for learning offensive secur
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   C2 Server                         │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ React UI │  │ FastAPI  │  │   PostgreSQL     │  │
-│  │ :3000    │→ │ :8000    │→ │   :5432          │  │
-│  └──────────┘  └────┬─────┘  └──────────────────┘  │
-│                     │                                │
-│         ┌───────────┼───────────┐                    │
-│         │ HTTP      │ DNS       │                    │
-│         │ Polling   │ TXT       │                    │
-└─────────┼───────────┼───────────┘                    │
-          │           │
-    ┌─────┴─────┐  ┌──┴───┐  ┌──────┐
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐   │
+│  │ React UI │  │ FastAPI  │  │   PostgreSQL     │   │
+│  │ :3000    │→ │ :8000    │→ │   :5432          │   │
+│  └──────────┘  └────┬─────┘  └──────────────────┘   │
+│                     │                               │
+│         ┌───────────┼───────────┐                   │
+│         │ HTTP      │ DNS       │                   │
+│         │ Polling   │ TXT       │                   │
+└─────────┼───────────┼───────────┼───────────────────┘
+          │           │           │
+    ┌─────┴─────┐  ┌──┴────┐  ┌───┴───┐
     │  Implant  │  │Implant│  │Implant│
-    │  (Python) │  │ (C++) │  │ (C#) │
+    │  (Python) │  │ (C++) │  │ (C#)  │
     │  Win/Lin  │  │ Linux │  │  Win  │
-    └───────────┘  └───────┘  └──────┘
+    └───────────┘  └───────┘  └───────┘
 ```
 
 ## Project Structure
@@ -172,7 +172,7 @@ dotnet publish -c Release -r win-x64 --self-contained true /p:C2Server=10.0.0.5:
 | `DEFAULT_ADMIN_PASSWORD` | `admin123` | Initial operator password |
 | `ENABLE_DNS_SERVER` | `false` | Enable DNS C2 channel |
 | `C2_DNS_DOMAIN` | `c2.local` | DNS C2 domain |
-| `DNS_PORT` | `5353` | DNS listener port |
+| `DNS_PORT` | `15353` | DNS listener port |
 
 ### Client
 | Variable | Default | Description |
@@ -182,7 +182,7 @@ dotnet publish -c Release -r win-x64 --self-contained true /p:C2Server=10.0.0.5:
 | `C2_JITTER` | `0.3` | Jitter factor (0-1) |
 | `C2_CHANNEL` | `http` | Channel: `http` or `dns` |
 | `C2_DNS_DOMAIN` | `c2.local` | DNS exfil domain |
-| `C2_DNS_PORT` | `5353` | DNS server port |
+| `C2_DNS_PORT` | `15353` | DNS server port |
 
 ## API Reference
 
@@ -245,7 +245,7 @@ dotnet publish -c Release -r win-x64 --self-contained true /p:C2Server=10.0.0.5:
    d. POST /agent/{id}/commands/{cid}/result → send output
 ```
 
-### DNS Channel (UDP, port 5353 by default)
+### DNS Channel (UDP, port 15353 by default)
 
 Uses DNS TXT record queries as the transport layer. Useful when HTTP is blocked but DNS resolution is allowed.
 

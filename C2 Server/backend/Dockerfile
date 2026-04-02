@@ -29,5 +29,6 @@ COPY backend/ /app/backend/
 ENV PYTHONPATH=/app
 
 EXPOSE 8000
+EXPOSE 15353/udp
 
-CMD ["uvicorn", "backend.classes.servers.http_server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "backend.main"]

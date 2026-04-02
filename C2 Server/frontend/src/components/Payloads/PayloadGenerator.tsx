@@ -7,6 +7,8 @@ const PayloadGenerator: React.FC = () => {
   const [interval, setInterval_] = useState("10");
   const [jitter, setJitter] = useState("0.3");
   const [channel, setChannel] = useState("http");
+  const [dnsDomain, setDnsDomain] = useState("c2.local");
+  const [dnsPort, setDnsPort] = useState("15353");
   const [persist, setPersist] = useState("none");
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState("");
@@ -24,6 +26,9 @@ const PayloadGenerator: React.FC = () => {
           c2_server: c2Server,
           interval: parseInt(interval, 10) || 10,
           jitter: parseFloat(jitter) || 0.3,
+          communication_channel: channel,
+          dns_domain: dnsDomain,
+          dns_port: parseInt(dnsPort, 10) || 15353,
         },
         { responseType: "blob" }
       );
@@ -53,6 +58,8 @@ const PayloadGenerator: React.FC = () => {
           interval: parseInt(interval, 10) || 10,
           jitter: parseFloat(jitter) || 0.3,
           communication_channel: channel,
+          dns_domain: dnsDomain,
+          dns_port: parseInt(dnsPort, 10) || 15353,
           persist,
         },
         { responseType: "blob" }
@@ -127,6 +134,26 @@ const PayloadGenerator: React.FC = () => {
             <option value="http">HTTP</option>
             <option value="dns">DNS</option>
           </select>
+          {channel === "dns" && (
+            <>
+              <label>DNS Domain</label>
+              <input
+                type="text"
+                value={dnsDomain}
+                onChange={(e) => setDnsDomain(e.target.value)}
+                placeholder="c2.local"
+                style={{ width: "120px" }}
+              />
+              <label>DNS Port</label>
+              <input
+                type="text"
+                value={dnsPort}
+                onChange={(e) => setDnsPort(e.target.value)}
+                placeholder="15353"
+                style={{ width: "80px" }}
+              />
+            </>
+          )}
           <label>Persistence</label>
           <select value={persist} onChange={(e) => setPersist(e.target.value)}>
             {targetOs === "windows" ? (

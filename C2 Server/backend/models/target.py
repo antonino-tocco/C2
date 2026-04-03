@@ -19,6 +19,7 @@ class Target(SQLModel, table=True):
     communication_channel: str = Field(default="http")  # "http" | "dns"
     beacon_interval: int = Field(default=60)    # seconds between check-ins
     beacon_jitter: float = Field(default=0.3)   # ±fraction applied to interval
+    beacon_timeout: int = Field(default=300)    # seconds without beacon before auto-deactivation (0 = disabled)
     last_seen: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     commands: list["Command"] = Relationship(back_populates="target")

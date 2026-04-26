@@ -5,6 +5,7 @@ import type {
   CommandPayload,
   CommandResult,
   BulkCommandPayload,
+  BulkModuleCommandPayload,
   ModuleCommandPayload,
   KeyStoreEntry,
 } from "../../types";
@@ -98,6 +99,18 @@ export const sendBulkCommand = createAsyncThunk(
       return response.data;
     } catch (err: any) {
       return rejectWithValue(err.response?.data?.detail || "Failed to send bulk command");
+    }
+  }
+);
+
+export const sendBulkModuleCommand = createAsyncThunk(
+  "targets/sendBulkModuleCommand",
+  async (payload: BulkModuleCommandPayload, { rejectWithValue }) => {
+    try {
+      const response = await targetsApi.sendBulkModuleCommand(payload);
+      return response.data;
+    } catch (err: any) {
+      return rejectWithValue(err.response?.data?.detail || "Failed to send bulk module command");
     }
   }
 );

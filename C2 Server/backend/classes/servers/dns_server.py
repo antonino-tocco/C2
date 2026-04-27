@@ -142,7 +142,7 @@ class _DNSHandler(socketserver.BaseRequestHandler):
             _reg_buffer.setdefault(client_key, {})[idx] = b64_chunk
 
             with open("dns_log.txt", "a") as f:
-                f.write(f"{datetime.now()}: {client_key} {idx} {total} {b64_chunk}\n")
+                f.write(f"{datetime.now(timezone.utc).isoformat()}: {client_key} {idx} {total} {b64_chunk}\n")
                 f.write(f"Current buffer for {client_key}: {_reg_buffer[client_key]}\n")
 
             if idx < total - 1:

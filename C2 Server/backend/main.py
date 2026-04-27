@@ -34,7 +34,13 @@ def _reaper_loop() -> None:
                 ).all()
 
                 for t in targets:
-                    elapsed = (now - t.last_seen).total_seconds()
+                    # Ensure last_seen is timezone-aware to avoid datetime subtraction errors
+                    last_seen = t.last_seen
+                    if last_seen.tzinfo is None:
+                        # Convert naive datetime to UTC-aware
+                        last_seen = last_seen.replace(tzinfo=timezone.utc)
+
+                    elapsed = (now - last_seen).total_seconds()
                     if elapsed > t.beacon_timeout:
                         print(f"[reaper] Target {t.id} ({t.hostname}) inactive — "
                               f"last seen {int(elapsed)}s ago (timeout {t.beacon_timeout}s)")

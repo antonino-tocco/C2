@@ -32,11 +32,8 @@ def create_access_token(subject: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
-def get_current_user(
-    creds: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    session: Session = Depends(get_session),
-) -> User:
-    token = creds.credentials
+def get_user_from_token(token: str, session: Session) -> User:
+    """Get user from JWT token string."""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         username: str | None = payload.get("sub")
@@ -49,3 +46,11 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
+
+
+def get_current_user(
+    creds: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    session: Session = Depends(get_session),
+) -> User:
+    token = creds.credentials
+    return get_user_from_token(token, session)

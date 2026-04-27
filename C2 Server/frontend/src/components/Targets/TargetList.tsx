@@ -97,6 +97,54 @@ const TargetList: React.FC = () => {
     setBulkSending(false);
   };
 
+  const handleBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+
+    const confirmDelete = window.confirm(
+      `Are you sure you want to PERMANENTLY DELETE ${selectedIds.size} selected target(s)?\n\n` +
+      `This will delete:\n` +
+      `- All target records\n` +
+      `- All command history\n` +
+      `- All stored encryption keys\n` +
+      `- All exfiltrated data\n\n` +
+      `This action CANNOT be undone!`
+    );
+
+    if (!confirmDelete) return;
+
+    setBulkSending(true);
+    setBulkResult(null);
+
+    let deleted = 0;
+    let failed = 0;
+
+    for (const targetId of selectedIds) {
+      try {
+        const response = await fetch(`/api/v1/targets/${targetId}`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+
+        if (response.ok) {
+          deleted++;
+        } else {
+          failed++;
+        }
+      } catch (error) {
+        failed++;
+      }
+    }
+
+    setBulkResult(`Deletion complete: ${deleted} deleted, ${failed} failed`);
+    setBulkSending(false);
+    setSelectedIds(new Set());
+
+    // Refresh the targets list
+    dispatch(fetchTargets());
+  };
+
   const handleBulkModule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedIds.size === 0) return;
@@ -251,6 +299,20 @@ const TargetList: React.FC = () => {
                 >
                   Module
                 </button>
+                <button
+                  onClick={handleBulkDelete}
+                  disabled={selectedIds.size === 0 || bulkSending}
+                  style={{
+                    padding: "0.3rem 0.8rem",
+                    fontSize: "0.85rem",
+                    backgroundColor: "#f44336",
+                    color: "white",
+                    border: "1px solid #f44336",
+                    marginLeft: "auto"
+                  }}
+                >
+                  {bulkSending ? "Deleting..." : `Delete Selected (${selectedIds.size})`}
+                </button>
               </div>
 
               {bulkTab === "raw" && (
@@ -374,7 +436,6 @@ const TargetList: React.FC = () => {
                         <select value={exfilEncryption} onChange={(e) => setExfilEncryption(e.target.value)}>
                           <option value="none">None (base64 only)</option>
                           <option value="xor">XOR + base64</option>
-                          <option value="aes">AES-256-CBC + base64</option>
                         </select>
                       </div>
                     </>
